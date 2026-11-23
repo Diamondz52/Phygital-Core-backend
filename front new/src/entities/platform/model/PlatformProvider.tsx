@@ -1,0 +1,165 @@
+"use client";
+
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { type User, type authService } from "@/entities/user/@x/platform";
+import { platformService } from "../api/platformService";
+import { createPlatformActions } from "../api/createPlatformActions";
+import { initialState } from "./initialState";
+import { type PlatformActions } from "./types";
+
+const PlatformContext = createContext<PlatformActions | null>(null);
+
+export function PlatformProvider({
+  children,
+  actor: signedInUser,
+  accountService,
+}: {
+  children: ReactNode;
+  actor: User | null;
+  accountService: typeof authService;
+}) {
+  const [state, setState] = useState(initialState);
+  const [storageError, setStorageError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+
+    const refresh = async () => {
+      const token = localStorage.getItem("jwt_token");
+
+      let backendTeams = null;
+      let backendLogs = null;
+      let backendUsers = null;
+      let backendFeedback = null;
+      let backendTournaments = null;
+      let backendApplications = null;
+      let backendInvitations = null;
+      let backendNotifications = null;
+
+      if (token) {
+        try {
+          const resTeams = await fetch("https://phygitalcore.ru/api/v1/teams", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (resTeams.ok) backendTeams = await resTeams.json();
+
+          const resLogs = await fetch("https://phygitalcore.ru/api/v1/admin-logs", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (resLogs.ok) backendLogs = await resLogs.json();
+
+          const resUsers = await fetch("https://phygitalcore.ru/api/v1/admin/users", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (resUsers.ok) backendUsers = await resUsers.json();
+
+          const resFeedback = await fetch("https://phygitalcore.ru/api/v1/feedback", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (resFeedback.ok) backendFeedback = await resFeedback.json();
+
+          const resTournaments = await fetch("https://phygitalcore.ru/api/v1/tournaments", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (resTournaments.ok) backendTournaments = await resTournaments.json();
+
+          const resApps = await fetch("https://phygitalcore.ru/api/v1/tournament-applications", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (resApps.ok) backendApplications = await resApps.json();
+
+          const resInvitations = await fetch("https://phygitalcore.ru/api/v1/invitations", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (resInvitations.ok) backendInvitations = await resInvitations.json();
+
+          const resNotifications = await fetch("https://phygitalcore.ru/api/v1/notifications", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (resNotifications.ok) backendNotifications = await resNotifications.json();
+        } catch (error) {
+          console.error("Ошибка загрузки с сервера:", error);
+        }
+      }
+
+      if (active) {
+        // Устанавливаем ТОЛЬКО серверные данные (или пустые массивы, если ничего не пришло)
+        setState((prev) => ({
+          ...prev,
+          teams: backendTeams || [],
+          logs: backendLogs || [],
+          users: backendUsers || [],
+          feedback: backendFeedback || [],
+          tournaments: backendTournaments || [],
+          tournamentApplications: backendApplications || [],
+          invitations: backendInvitations || [],
+          notifications: backendNotifications || [],
+        }));
+        setStorageError("");
+      }
+    };
+
+    const handleRefresh = () => {
+      void refresh();
+    };
+
+    const unsubscribe = platformService.subscribe(handleRefresh);
+    handleRefresh();
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    const sync = (event: Event) => {
+      const detail = (event as CustomEvent<User>).detail;
+      if (!detail?.id) return;
+      void platformService
+        .updateState((previous) => {
+          const exists = previous.users.some((item) => item.id === detail.id);
+          const users = exists
+            ? previous.users.map((item) => (item.id === detail.id ? { ...item, ...detail } : item))
+            : [...previous.users, { ...detail, createdAt: new Date().toISOString() }];
+          return { ...previous, users };
+        }, initialState)
+        .then(setState)
+        .catch(() => setStorageError("Не удалось сохранить данные пользователя"));
+    };
+    window.addEventListener("phygital:user-sync", sync);
+    return () => window.removeEventListener("phygital:user-sync", sync);
+  }, []);
+
+  const actions = useMemo(
+    () =>
+      createPlatformActions(
+        state,
+        signedInUser,
+        accountService,
+        async (change) => {
+          const next = await platformService.updateState(change, initialState);
+          setState(next);
+        },
+        setStorageError,
+      ),
+    [state, signedInUser, accountService],
+  );
+
+  return (
+    <PlatformContext.Provider value={actions}>
+      {storageError && (
+        <p className="storage-error" role="alert">
+          {storageError}
+        </p>
+      )}
+      {children}
+    </PlatformContext.Provider>
+  );
+}
+
+export function usePlatformStore() {
+  const value = useContext(PlatformContext);
+  if (!value) throw new Error("usePlatformStore requires PlatformProvider");
+  return value;
+}
